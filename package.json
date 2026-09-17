@@ -1,0 +1,21 @@
+{
+  "name": "jev-agent-device",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A Jev decision loop for mobile QA with agent-device",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "qa": "node --env-file-if-exists=.env src/cli.mjs",
+    "demo": "node src/demo.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check src/agent.mjs && node --check src/cli.mjs && npm test"
+  },
+  "exports": "./src/index.mjs",
+  "dependencies": {
+    "@typesafe-ai/sdk": "0.6.0",
+    "agent-device": "0.21.6"
+  }
+}
