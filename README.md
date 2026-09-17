@@ -37,7 +37,9 @@ npm run qa -- \
   "Add a Canvas backpack to the cart, increase its quantity to two, and open checkout. Verify that the summary shows the backpack and a quantity of two. Stop before placing an order."
 ```
 
-Jev chooses actions and reviews the outcome against your task. No separate assertion file is needed. The harness selects a simulator or emulator automatically, preferring one already booted. Use `--udid` on iOS or `--serial` on Android to override the selection. `npm run qa -- --help` lists the optional controls.
+Jev chooses actions until it selects `qa_pass`, `qa_fail`, or `incomplete`. That choice sets the final status. No separate assertion file is needed. The harness selects a simulator or emulator automatically, preferring one already booted. Use `--udid` on iOS or `--serial` on Android to override the selection. `npm run qa -- --help` lists the optional controls.
+
+Each decision receives the current snapshot, the previous snapshot, and the action executed between them. Earlier snapshots stay in the saved artifacts instead of accumulating in the model context.
 
 For text entry, put exact values in double quotes inside the task. The harness makes those strings available as fill choices:
 
@@ -48,16 +50,22 @@ npm run qa -- --app com.example.shop --platform ios \
 
 ## Output
 
-The CLI prints each selected action, then the result, duration, token usage, estimated inference cost, and video path. You don't need to open the HTML report to see the outcome.
+The CLI prints each selected action, then the result, startup time, run duration, token usage, estimated inference cost, and video path. Run details are saved as JSON.
 
 ```text
 PASSED: Jev found that the task was satisfied.
 Actions executed: <count> | QA confidence: <confidence>
-Duration: <seconds> s | Jev input tokens: <tokens>
+Startup: <seconds> s
+Duration: <seconds> s
+Jev input tokens: <tokens>
 Estimated inference cost: $<cost>
 Video: artifacts/<run-id>/run.mp4
-Report: artifacts/<run-id>/report.html
+JSON: artifacts/<run-id>/report.json
 ```
+
+Startup includes device selection, app launch, runner preparation, and recording setup. Duration starts with the QA loop and includes saving the recording and closing the session.
+
+If the requested state is already visible, the run can pass without any actions. Ask the agent to repeat the navigation from a specific starting screen if you want to exercise the full path.
 
 Exit codes are `0` for pass, `1` for fail, `2` for incomplete, and `3` for an error. Incomplete means the agent couldn't finish or confidently assess the result.
 
@@ -66,7 +74,7 @@ The video, screenshots, snapshots, and decision trace are saved in `artifacts/<r
 ## Run limits
 
 - Runs stop after 40 steps or 180 seconds by default. Adjust these with `--max-steps` and `--timeout`.
-- Large screens can exceed Jev's 255-choice limit. Use `--scope` to focus on part of the app. The harness also caps accumulated context at 80,000 characters.
+- Large screens can exceed Jev's 255-choice limit. Use `--scope` to focus on part of the app. The harness also caps each request's state at 80,000 characters.
 
 ## References
 

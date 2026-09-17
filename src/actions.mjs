@@ -16,8 +16,9 @@ export function assertReadable(snapshot) {
 export function buildActions(snapshot, inputs = {}) {
   assertReadable(snapshot);
   const actions = [
-    { id: 'done', kind: 'done', description: 'The requested journey is complete, or the app shows a failure of the requested behavior. Stop interacting and review the observed evidence for a QA verdict.' },
-    { id: 'blocked', kind: 'blocked', description: 'Cannot continue with the available controls or context. Stop as incomplete.' },
+    { id: 'qa_pass', kind: 'verdict', status: 'passed', description: 'Finish with QA PASS. The observed app state and executed actions satisfy the task and its constraints. The evidence establishes the outcome the task actually asks to verify. An already-satisfied task can pass without extra actions unless the task explicitly requires replaying the steps.' },
+    { id: 'qa_fail', kind: 'verdict', status: 'failed', description: 'Finish with QA FAIL. Observed behavior contradicts the task, or an executed action violated a task constraint. Missing evidence alone is not a failure.' },
+    { id: 'incomplete', kind: 'verdict', status: 'incomplete', description: 'Finish as INCOMPLETE. The outcome cannot be determined and no available action can obtain the missing evidence or advance the task.' },
     { id: 'need_input', kind: 'blocked', description: 'The task needs text input that was not supplied. Stop as incomplete.' },
     { id: 'wait', kind: 'wait', description: 'Wait briefly for loading or an animation, then read the screen again.' },
     { id: 'back', kind: 'back', description: 'Navigate back within the app.' },
@@ -36,7 +37,7 @@ export function buildActions(snapshot, inputs = {}) {
         description: `Focus ${role} ${JSON.stringify(label)} at ${node.ref}.` });
       for (const [name, text] of Object.entries(inputs)) {
         actions.push({ id: `a${actions.length}`, kind: 'fill', ref, target: node.identifier || label, text, inputName: name,
-          description: `Fill ${role} ${JSON.stringify(label)} with the supplied input named ${JSON.stringify(name)}.` });
+          description: `Fill ${role} ${JSON.stringify(label)} with ${JSON.stringify(text)}.` });
       }
     } else if (PRESS_ROLES.has(role) || (node.hittable === true && node.label)) {
       actions.push({ id: `a${actions.length}`, kind: 'press', ref, target: node.identifier || label,
@@ -47,14 +48,19 @@ export function buildActions(snapshot, inputs = {}) {
   return actions;
 }
 
-export function modelState(snapshot) {
+export function prepareSnapshot(snapshot) {
   return {
     app: snapshot.appBundleId || snapshot.appName,
-    nodes: visibleNodes(snapshot).map(({ ref, role, type, label, value, identifier, enabled, selected, editable, parentIndex, index }) =>
-      ({ ref, role: type || role, label, value, identifier, enabled, selected, editable, parentIndex, index })),
+    visibility: snapshot.visibility,
+    nodes: visibleNodes(snapshot).map(({ ref, role, type, label, value, identifier, enabled, selected, editable,
+      parentIndex, index, rect, visibleToUser, hittable, interactionBlocked, presentationHints,
+      hiddenContentAbove, hiddenContentBelow }) =>
+      ({ ref, role: type || role, label, value, identifier, enabled, selected, editable, parentIndex, index,
+        rect, visibleToUser: visibleToUser ?? null, hittable: hittable ?? null, interactionBlocked,
+        presentationHints, hiddenContentAbove, hiddenContentBelow })),
   };
 }
 
 export function fingerprint(snapshot) {
-  return JSON.stringify(modelState(snapshot).nodes.map(({ ref, index, parentIndex, ...node }) => node));
+  return JSON.stringify(prepareSnapshot(snapshot).nodes.map(({ ref, index, parentIndex, ...node }) => node));
 }

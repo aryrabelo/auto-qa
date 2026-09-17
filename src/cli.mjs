@@ -22,7 +22,7 @@ const HELP = `Usage: npm run qa -- --app <bundle/package ID> [options] "Task to 
 
 Set TYPESAFE_API_KEY through your environment or a local .env file.
 Describe the expected outcome in the task. Put exact form values in double quotes.
-Jev reviews the observed app states and returns qa_pass, qa_fail, or incomplete.
+Jev finishes by choosing qa_pass, qa_fail, or incomplete.
 Exit codes: 0 QA pass, 1 QA fail, 2 incomplete, 3 runtime/config error.`;
 
 async function main() {
@@ -47,7 +47,7 @@ async function main() {
     minConfidence: Number(v['min-confidence']), timeoutMs: Number(v.timeout) * 1000,
     inputUsdPerMillion: Number(process.env.JEV_INPUT_USD_PER_MILLION || '0.042'),
     artifactsDir: v.artifacts, record: !v['no-record'],
-    onStep: step => console.log(`${step.step}. Selected: ${step.action} (${step.latencyMs.toFixed(0)} ms; confidence ${step.confidence.toFixed(2)})`),
+    onStep: step => console.log(`${step.step}. ${step.kind === 'verdict' ? 'Decision: ' + step.choice : 'Selected: ' + step.action} (${step.latencyMs.toFixed(0)} ms; confidence ${step.confidence.toFixed(2)})`),
   });
   const controller = new AbortController();
   const stop = () => { if (!controller.signal.aborted) console.log('\nStopping after the current device operation…'); controller.abort(); };
@@ -60,7 +60,6 @@ async function main() {
       qa_fail: 'Jev found a failure against the task.',
       incomplete: 'Jev could not determine the outcome from the observed app states.',
       low_confidence: 'The selected action was below your confidence cutoff and was not executed.',
-      low_verdict_confidence: 'Jev could not confidently determine the QA outcome.',
       blocked: 'The agent could not continue with the available controls.',
       need_input: 'The agent needs a text value. Include it in double quotes in the task.',
       step_limit: 'The run reached its step limit.',
@@ -72,13 +71,15 @@ async function main() {
     console.log(`\n${result.status.toUpperCase()}: ${explanations[result.reason] || result.reason}`);
     const confidence = result.verdict ? ` | QA confidence: ${result.verdict.confidence.toFixed(2)}` : '';
     console.log(`Actions executed: ${result.steps.filter(step => step.executed).length}${confidence}`);
-    console.log(`Duration: ${(result.durationMs / 1000).toFixed(2)} s | Jev input tokens: ${result.usage.inputTokens}`);
+    console.log(`Startup: ${(result.startupMs / 1000).toFixed(2)} s`);
+    console.log(`Duration: ${(result.durationMs / 1000).toFixed(2)} s`);
+    console.log(`Jev input tokens: ${result.usage.inputTokens}`);
     console.log(`Estimated inference cost: ${result.usage.requests === 0 ? '$0 (Jev was not called)' : result.estimatedInferenceCostUsd == null ? 'unavailable' : '$' + result.estimatedInferenceCostUsd.toFixed(8)}`);
     const videos = result.recording?.chunks?.map(chunk => chunk.path) || [result.recording?.outPath];
     const paths = videos.filter(Boolean);
     if (paths.length) paths.forEach(path => console.log(`Video: ${path}`));
     else console.log('Video: not recorded');
-    console.log(`Report: ${result.directory}/report.html`);
+    console.log(`JSON: ${result.directory}/report.json`);
     result.warnings.forEach(w => console.error(`Note: ${w}`));
     process.exitCode = { passed: 0, failed: 1, incomplete: 2, error: 3 }[result.status];
   } finally {
