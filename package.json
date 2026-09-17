@@ -9,7 +9,6 @@
   },
   "scripts": {
     "qa": "node src/cli.mjs",
-    "demo": "node src/demo.mjs",
     "check": "node --check src/agent.mjs && node --check src/device.mjs && node --check src/cli.mjs"
   },
   "exports": "./src/index.mjs",

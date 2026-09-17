@@ -10,7 +10,6 @@ export class JevModel {
   constructor({ apiKey = process.env.TYPESAFE_API_KEY, model = process.env.TYPESAFE_MODEL || 'jev-latest', timeoutMs = 15_000, client } = {}) {
     if (!client && !apiKey) throw new Error('Set TYPESAFE_API_KEY in your environment or .env before running QA.');
     this.model = model;
-    this.mode = 'live';
     this.client = client || new TypeSafeClient({ apiKey, timeout: timeoutMs, retry: { maxRetries: 0 }, logLevel: 'off' });
   }
 

@@ -23,8 +23,7 @@ const HELP = `Usage: npm run qa -- --app <bundle/package ID> [options] "Task to 
 Set TYPESAFE_API_KEY through your environment or a local .env file.
 Describe the expected outcome in the task. Put exact form values in double quotes.
 Jev reviews the observed app states and returns qa_pass, qa_fail, or incomplete.
-Exit codes: 0 QA pass, 1 QA fail, 2 incomplete, 3 runtime/config error.
-Run 'npm run demo' for a clearly labeled simulation with no API key or device.`;
+Exit codes: 0 QA pass, 1 QA fail, 2 incomplete, 3 runtime/config error.`;
 
 async function main() {
   if (existsSync('.env')) process.loadEnvFile('.env');
@@ -56,9 +55,29 @@ async function main() {
   process.once('SIGTERM', stop);
   try {
     const result = await agent.generate({ prompt, abortSignal: controller.signal });
-    console.log(`\n${result.status.toUpperCase()}: ${result.reason}`);
+    const explanations = {
+      qa_pass: 'Jev found that the task was satisfied.',
+      qa_fail: 'Jev found a failure against the task.',
+      incomplete: 'Jev could not determine the outcome from the observed app states.',
+      low_confidence: 'The selected action was below your confidence cutoff and was not executed.',
+      low_verdict_confidence: 'Jev could not confidently determine the QA outcome.',
+      blocked: 'The agent could not continue with the available controls.',
+      need_input: 'The agent needs a text value. Include it in double quotes in the task.',
+      step_limit: 'The run reached its step limit.',
+      timeout: 'The run reached its time limit.',
+      cancelled: 'The run was cancelled.',
+      repeated_action_without_progress: 'The same action repeatedly made no progress.',
+      runtime_error: 'The run stopped because of an error. See the details below.',
+    };
+    console.log(`\n${result.status.toUpperCase()}: ${explanations[result.reason] || result.reason}`);
+    const confidence = result.verdict ? ` | QA confidence: ${result.verdict.confidence.toFixed(2)}` : '';
+    console.log(`Actions executed: ${result.steps.filter(step => step.executed).length}${confidence}`);
     console.log(`Duration: ${(result.durationMs / 1000).toFixed(2)} s | Jev input tokens: ${result.usage.inputTokens}`);
     console.log(`Estimated inference cost: ${result.usage.requests === 0 ? '$0 (Jev was not called)' : result.estimatedInferenceCostUsd == null ? 'unavailable' : '$' + result.estimatedInferenceCostUsd.toFixed(8)}`);
+    const videos = result.recording?.chunks?.map(chunk => chunk.path) || [result.recording?.outPath];
+    const paths = videos.filter(Boolean);
+    if (paths.length) paths.forEach(path => console.log(`Video: ${path}`));
+    else console.log('Video: not recorded');
     console.log(`Report: ${result.directory}/report.html`);
     result.warnings.forEach(w => console.error(`Note: ${w}`));
     process.exitCode = { passed: 0, failed: 1, incomplete: 2, error: 3 }[result.status];

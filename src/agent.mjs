@@ -32,7 +32,7 @@ export class JevDeviceAgent {
     const directory = resolve(this.artifactsDir, runId);
     const deadline = AbortSignal.timeout(this.timeoutMs);
     const signal = abortSignal ? AbortSignal.any([abortSignal, deadline]) : deadline;
-    const result = { runId, prompt, mode: this.model.mode || 'live', status: 'incomplete', reason: 'step_limit',
+    const result = { runId, prompt, status: 'incomplete', reason: 'step_limit',
       startedAt: new Date().toISOString(), directory, steps: [], verdict: null,
       usage: { requests: 0, inputTokens: 0, outputTokens: 0, complete: true }, warnings: [], modelVersions: [], recording: null, screenshot: null };
     const history = [];
@@ -134,7 +134,7 @@ export class JevDeviceAgent {
       }
       result.durationMs = performance.now() - started;
       result.inputUsdPerMillion = this.inputUsdPerMillion;
-      result.estimatedInferenceCostUsd = result.mode === 'simulation' || !result.usage.complete ? null : result.usage.inputTokens / 1_000_000 * this.inputUsdPerMillion;
+      result.estimatedInferenceCostUsd = !result.usage.complete ? null : result.usage.inputTokens / 1_000_000 * this.inputUsdPerMillion;
       this.running = false;
     }
     await writeReport(directory, result);
