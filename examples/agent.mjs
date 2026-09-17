@@ -11,7 +11,6 @@ const agent = new JevDeviceAgent({
 
 const result = await agent.generate({
   prompt: 'Add a Canvas backpack to the cart, set the quantity to two, and open the checkout summary. Stop before placing an order.',
-  checks: [{ name: 'Checkout summary', textIncludes: 'Checkout summary' }],
 });
 
 console.log(result.status, result.directory);

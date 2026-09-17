@@ -35,6 +35,12 @@ export class SimulatedShop {
 
 export class SimulatedDecisions {
   mode = 'simulation';
+  async evaluate({ state }) {
+    const product = state.screen.nodes.find(n => n.identifier === 'checkout-product');
+    const quantity = state.screen.nodes.find(n => n.identifier === 'checkout-quantity');
+    return { choice: product?.label === 'Canvas backpack' && quantity?.value === '2' ? 'qa_pass' : 'qa_fail',
+      confidence: 0.99, model: 'simulation', latencyMs: 0, usage: { input_tokens: 0, output_tokens: 0 } };
+  }
   async decide({ state, actions }) {
     const text = JSON.stringify(state.screen.nodes);
     const label = text.includes('Checkout summary') ? null

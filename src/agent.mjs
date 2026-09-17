@@ -2,7 +2,7 @@ import { mkdir, writeFile, appendFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { buildActions, modelState, fingerprint, assertReadable } from './actions.mjs';
-import { validateChecks, evaluateChecks } from './checks.mjs';
+import { promptInputs } from './inputs.mjs';
 import { writeReport } from './report.mjs';
 
 function finite(value, name, min, max = Infinity) {
@@ -10,22 +10,22 @@ function finite(value, name, min, max = Infinity) {
 }
 
 export class JevDeviceAgent {
-  constructor({ model, device, maxSteps = 40, minConfidence = 0.6, timeoutMs = 180_000, inputUsdPerMillion = 0.042, artifactsDir = 'artifacts', record = true, onStep } = {}) {
-    if (!model?.decide || !device?.snapshot) throw new Error('model and device adapters are required.');
+  constructor({ model, device, maxSteps = 40, minConfidence = 0, minVerdictConfidence = 0.6, timeoutMs = 180_000, inputUsdPerMillion = 0.042, artifactsDir = 'artifacts', record = true, onStep } = {}) {
+    if (!model?.decide || !model?.evaluate || !device?.snapshot) throw new Error('model and device adapters are required.');
     finite(maxSteps, 'maxSteps', 1, 1000);
     if (!Number.isInteger(maxSteps)) throw new Error('maxSteps must be an integer.');
     finite(minConfidence, 'minConfidence', 0, 1);
+    finite(minVerdictConfidence, 'minVerdictConfidence', 0, 1);
     finite(timeoutMs, 'timeoutMs', 1, 3_600_000);
     finite(inputUsdPerMillion, 'inputUsdPerMillion', 0);
-    Object.assign(this, { model, device, maxSteps, minConfidence, timeoutMs, inputUsdPerMillion, artifactsDir, record, onStep });
+    Object.assign(this, { model, device, maxSteps, minConfidence, minVerdictConfidence, timeoutMs, inputUsdPerMillion, artifactsDir, record, onStep });
     this.running = false;
   }
 
-  async generate({ prompt, inputs = {}, checks = [], abortSignal } = {}) {
+  async generate({ prompt, inputs = promptInputs(prompt), abortSignal } = {}) {
     if (this.running) throw new Error('This agent is already running. Use another session for concurrent work.');
     if (typeof prompt !== 'string' || !prompt.trim()) throw new Error('A nonempty task prompt is required.');
     if (!inputs || Array.isArray(inputs) || typeof inputs !== 'object' || !Object.entries(inputs).every(([k, v]) => k && typeof v === 'string')) throw new Error('inputs must map names to strings.');
-    validateChecks(checks);
     this.running = true;
     const started = performance.now();
     const runId = `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`;
@@ -33,8 +33,23 @@ export class JevDeviceAgent {
     const deadline = AbortSignal.timeout(this.timeoutMs);
     const signal = abortSignal ? AbortSignal.any([abortSignal, deadline]) : deadline;
     const result = { runId, prompt, mode: this.model.mode || 'live', status: 'incomplete', reason: 'step_limit',
-      startedAt: new Date().toISOString(), directory, steps: [], checks: checks.map(c => ({ name: c.name, status: 'not_run' })),
-      usage: { inputTokens: 0, outputTokens: 0, complete: true }, warnings: [], modelVersions: [], recording: null, screenshot: null };
+      startedAt: new Date().toISOString(), directory, steps: [], verdict: null,
+      usage: { requests: 0, inputTokens: 0, outputTokens: 0, complete: true }, warnings: [], modelVersions: [], recording: null, screenshot: null };
+    const history = [];
+    const query = async (method, args) => {
+      if (JSON.stringify(args.state).length > 80_000) throw new Error('App context exceeds the POC limit. Narrow the snapshot scope or task.');
+      result.usage.requests++;
+      let answer;
+      try { answer = await this.model[method]({ ...args, signal }); }
+      catch (error) { result.usage.complete = false; throw error; }
+      const usage = answer.usage;
+      if (Number.isFinite(usage?.input_tokens) && usage.input_tokens >= 0 && Number.isFinite(usage?.output_tokens) && usage.output_tokens >= 0) {
+        result.usage.inputTokens += usage.input_tokens;
+        result.usage.outputTokens += usage.output_tokens;
+      } else result.usage.complete = false;
+      if (answer.model && !result.modelVersions.includes(answer.model)) result.modelVersions.push(answer.model);
+      return answer;
+    };
     let opened = false, recording = false, previous = '', repeats = 0;
     try {
       await mkdir(directory, { recursive: true });
@@ -54,23 +69,16 @@ export class JevDeviceAgent {
         assertReadable(snapshot);
         signal.throwIfAborted();
         const actions = buildActions(snapshot, inputs);
-        const state = { task: prompt, acceptanceCriteria: checks, inputs,
-          screen: modelState(snapshot), history: result.steps.map(s => ({ step: s.step, action: s.action })) };
-        if (JSON.stringify(state).length > 80_000) throw new Error('App context exceeds the POC limit. Narrow the snapshot scope or task.');
-        let decision;
-        try { decision = await this.model.decide({ state, actions, signal }); }
-        catch (error) { result.usage.complete = false; throw error; }
+        const state = { task: prompt, inputs, screen: modelState(snapshot), history };
+        const decision = await query('decide', { state, actions });
         const usage = decision.usage;
-        if (Number.isFinite(usage?.input_tokens) && usage.input_tokens >= 0 && Number.isFinite(usage?.output_tokens) && usage.output_tokens >= 0) {
-          result.usage.inputTokens += usage.input_tokens;
-          result.usage.outputTokens += usage.output_tokens;
-        } else result.usage.complete = false;
-        if (decision.model && !result.modelVersions.includes(decision.model)) result.modelVersions.push(decision.model);
         const action = actions.find(a => a.id === decision.choice);
         if (!action || !Number.isFinite(decision.confidence) || decision.confidence < 0 || decision.confidence > 1) throw new Error('Invalid model decision.');
-        const entry = { step, choice: action.id, kind: action.kind, action: action.description, ref: action.ref,
+        const entry = { executed: false, step, choice: action.id, kind: action.kind, action: action.description, ref: action.ref,
           confidence: decision.confidence, probabilities: decision.probabilities, latencyMs: decision.latencyMs ?? 0,
           model: decision.model, usage, snapshot: `snapshot-${step}.json` };
+        const observation = { step, screen: state.screen, action: action.description, executed: false };
+        history.push(observation);
         result.steps.push(entry);
         await appendFile(join(directory, 'trace.jsonl'), JSON.stringify(entry) + '\n');
         this.onStep?.(entry);
@@ -82,9 +90,15 @@ export class JevDeviceAgent {
           const finalSnapshot = await this.device.snapshot();
           await writeFile(join(directory, 'snapshot-final.json'), JSON.stringify(finalSnapshot, null, 2));
           signal.throwIfAborted();
-          result.checks = evaluateChecks(finalSnapshot, checks);
-          result.status = checks.length ? (result.checks.every(c => c.status === 'passed') ? 'passed' : 'failed') : 'completed';
-          result.reason = checks.length ? 'acceptance_checks' : 'model_judged_complete';
+          assertReadable(finalSnapshot);
+          const verdict = await query('evaluate', { state: { task: prompt, history, screen: modelState(finalSnapshot) } });
+          result.verdict = { ...verdict, snapshot: 'snapshot-final.json' };
+          await appendFile(join(directory, 'trace.jsonl'), JSON.stringify({ kind: 'verdict', ...result.verdict }) + '\n');
+          signal.throwIfAborted();
+          if (!['qa_pass', 'qa_fail', 'incomplete'].includes(verdict.choice) || !Number.isFinite(verdict.confidence) || verdict.confidence < 0 || verdict.confidence > 1) throw new Error('Invalid QA verdict.');
+          if (verdict.confidence < this.minVerdictConfidence) { result.reason = 'low_verdict_confidence'; break; }
+          result.status = { qa_pass: 'passed', qa_fail: 'failed', incomplete: 'incomplete' }[verdict.choice];
+          result.reason = verdict.choice;
           break;
         }
         const signature = fingerprint(snapshot) + JSON.stringify([action.kind, action.target, action.inputName, action.direction]);
@@ -92,6 +106,9 @@ export class JevDeviceAgent {
         previous = signature;
         if (repeats >= 3) { result.reason = 'repeated_action_without_progress'; break; }
         await this.device.act(action, { signal });
+        observation.executed = true;
+        entry.executed = true;
+        await appendFile(join(directory, 'trace.jsonl'), JSON.stringify({ step, kind: 'executed', choice: action.id }) + '\n');
       }
     } catch (error) {
       result.status = signal.aborted ? 'incomplete' : 'error';

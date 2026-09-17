@@ -1,6 +1,0 @@
-[
-  { "name": "Checkout is visible", "textIncludes": "Checkout summary" },
-  { "name": "Correct product", "selector": { "identifier": "checkout-product" }, "expected": { "label": "Canvas backpack" } },
-  { "name": "Quantity is two", "selector": { "identifier": "checkout-quantity" }, "expected": { "value": "2" } }
-]
-

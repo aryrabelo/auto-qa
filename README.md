@@ -19,28 +19,32 @@ Check your device setup with `npx agent-device devices`. See the [agent-device s
 
 ## Run a task
 
+Pass the app ID, platform, and task. Describe the expected outcome in the task itself:
+
+```bash
+npm run qa -- \
+  --app com.apple.Preferences \
+  --platform ios \
+  "Open Accessibility, then Display & Text Size. Scroll to Auto-Brightness and verify that its switch is visible. Do not change any settings."
+```
+
+This example uses Settings on an English-language iOS simulator. For your app, replace the app ID and task:
+
 ```bash
 npm run qa -- \
   --app com.example.shop \
-  --platform ios \
-  --expect "Checkout summary" \
-  "Add a Canvas backpack to the cart, set its quantity to two, and open the checkout summary. Stop before placing an order."
+  --platform android \
+  "Add a Canvas backpack to the cart, increase its quantity to two, and open checkout. Verify that the summary shows the backpack and a quantity of two. Stop before placing an order."
 ```
 
-Replace the app ID, prompt, and expected text with your app's values. The example checks only that the final screen contains `Checkout summary`. Add field-level checks to verify the product and quantity:
+Jev chooses actions and reviews the outcome against your task. No separate assertion file is needed. The harness selects an unclaimed simulator or emulator automatically, preferring one already booted. On iOS it prefers a standard iPhone as the fallback. It prints the selected device and pins its ID for the session. Use `--udid` on iOS or `--serial` on Android to override the selection. `npm run qa -- --help` lists the optional controls.
+
+For text entry, put exact values in double quotes inside the task. The harness makes those strings available as fill choices:
 
 ```bash
-npm run qa -- \
-  --app com.example.shop --platform android \
-  --serial emulator-5554 \
-  --checks examples/cart-checks.json \
-  --inputs examples/inputs.json \
-  "Add a Canvas backpack, change its quantity to two, and open checkout. Stop before placing an order."
+npm run qa -- --app com.example.shop --platform ios \
+  'Search for "Canvas backpack" and verify that its product page opens.'
 ```
-
-The identifiers in `cart-checks.json` describe the simulated shop. Change them to the accessibility identifiers and values in your app. `--expect` is a convenience for visible text checks; `selector` + `expected` checks match exactly one visible node and compare its fields.
-
-Use `--udid` on iOS or `--serial` on Android to pin a device. `npm run qa -- --help` lists all options. Use test data and a test account for QA tasks.
 
 ## Use it like a tool-loop agent
 
@@ -57,9 +61,7 @@ const agent = new JevDeviceAgent({
 });
 
 const result = await agent.generate({
-  prompt: 'Search for Canvas backpack and open its product page.',
-  inputs: { searchTerm: 'Canvas backpack' },
-  checks: [{ name: 'Product name visible', textIncludes: 'Canvas backpack' }],
+  prompt: 'Search for "Canvas backpack" and verify that its product page opens.',
 });
 
 console.log(result.status, result.directory);
@@ -72,48 +74,60 @@ The interface is conceptually similar to `ToolLoopAgent.generate({ prompt })`. J
 1. Open the specified app in a dedicated session and start recording.
 2. Read a full accessibility snapshot, including text needed to check the outcome.
 3. Build choices for press, fill, scroll, back, wait, finish, and stop.
-4. Send the task, current state, supplied inputs, acceptance criteria, and action history to Jev.
+4. Send the task, current state, quoted input values, and earlier observed states and actions to Jev.
 5. Validate the returned choice and confidence, then execute only that action.
-6. Repeat with fresh references. When Jev chooses to finish, capture a new snapshot and evaluate the explicit checks.
+6. Repeat with fresh references. When Jev finishes or observes a failure, capture a new snapshot. Ask Jev to choose `qa_pass`, `qa_fail`, or `incomplete` against the original task and observed history.
 7. Capture the final screenshot, stop recording, close the session, and write the report.
 
-Text entry uses named values supplied in `inputs`. Jev cannot invent a search query, email address, or other free-form string. Every fill choice maps to a supplied value. Snapshot references are refreshed after each action and carry their generation when available.
+Text entry uses quoted values from the task, or explicit `inputs` when using the JavaScript API. Jev cannot generate a search query, email address, or other free-form string. Every fill choice maps to a supplied value. Snapshot references are refreshed after each action and carry their generation when available.
 
 ## Results
 
 Open the printed `artifacts/<run-id>/report.html` to review the run. The same folder contains:
 
-- `report.json`: outcome, individual checks, timing, token usage, model versions, and estimated inference cost.
-- `trace.jsonl`: each selected action, confidence, probabilities, and model latency.
-- `snapshot-*.json`: the app state used for each decision and the final checks.
+- `report.json`: outcome, final model verdict, timing, token usage, model versions, and estimated inference cost.
+- `trace.jsonl`: each selected action and the final verdict, with confidence, probabilities, and model latency.
+- `snapshot-*.json`: the app state used for each decision and the final QA review.
 - `run.mp4` and `final.png` when supported. Long Android recordings may have multiple chunks.
 
-`passed` means the model finished and all supplied checks passed. `failed` means at least one final check failed. `completed` means Jev judged the task complete, but no explicit checks were supplied. `incomplete` covers low confidence, missing input, a blocked path, repeated ineffective actions, cancellation, or step/time limits. `error` identifies an integration/runtime failure. Checks that were never reached are `not_run`.
+The final review is a model judgment based on the accessibility states the agent observed:
+
+| Status | Meaning | Exit code |
+| --- | --- | --- |
+| `passed` | Jev selected `qa_pass`: the evidence supports the requested outcomes and constraints. | 0 |
+| `failed` | Jev selected `qa_fail`: the evidence shows a requested behavior failed or a task constraint was violated. | 1 |
+| `incomplete` | Evidence is insufficient, confidence is low, input is missing, progress is blocked, or the run hit a limit or was cancelled. | 2 |
+| `error` | A model or device integration failed, or returned invalid data. | 3 |
+
+Selecting the finish action alone never passes QA. The final review must return `qa_pass` above the configured confidence threshold. The review receives earlier screen observations and executed actions, so it can assess behavior that is no longer visible on the final screen. It cannot verify facts that the snapshots never exposed, and a confident model verdict can still be wrong.
 
 The report estimates inference cost from returned input-token usage and `JEV_INPUT_USD_PER_MILLION` (default `0.042`). It assumes free output tokens and excludes device infrastructure. Update the rate for your model/account. If a request fails or usage is unavailable, the total cost is marked unavailable rather than presenting a partial estimate as complete. Timings include device work and recording finalization; the trace also lists model request time separately.
 
-## Try the simulated demo and tests
+## Try the simulated demo
 
 ```bash
 npm run demo
-npm test
+npm run check
 ```
 
-The demo performs a complete shopping journey against a simulated device with predetermined decisions. It uses the same runner and assertions as live mode. It produces an HTML report but no video, real model costs, or performance claims.
+The demo performs a complete shopping journey against a simulated device with predetermined decisions. It uses the same runner and final-review interface as live mode. It produces an HTML report but no video, real model costs, or performance claims.
 
-Tests exercise successful and failed checks, fresh references, cancellation, confidence limits, incomplete snapshots, API errors, cleanup, and actual SDK request serialization using fake transports.
+`npm run check` performs syntax checks only.
 
 ## Current limits
 
 - Jev reads text/structured state, not screenshots. Visual-only controls and assertions need another approach.
 - The initial action set covers common press/fill/scroll interactions on iOS and Android. It does not generate text, run arbitrary commands, drag controls, or perform multi-app workflows.
 - A screen has at most 255 choices, including the control actions. If it exceeds that limit, narrow `--scope` or reduce supplied input values. Truncated, empty, or sparse snapshots stop the run.
-- The default confidence threshold of `0.6` is a starting point for experimentation, not an accuracy guarantee. Evaluate it on your app. A typed choice can still be the wrong choice.
+- The complete task context is capped at 80,000 characters. If the observed history exceeds that limit, the run stops with an error instead of silently dropping evidence.
+- Action confidence is logged but does not stop navigation by default. Set `--min-confidence` to opt into an action cutoff. The final QA review uses a separate confidence threshold of `0.6`; this is an experimental threshold, not an accuracy guarantee. A typed choice can still be wrong.
 - The timeout cancels Jev requests and is checked between device operations. An in-flight native device command and final recording export must finish before cleanup completes.
-- Recording failure is reported explicitly but does not replace the outcome of the acceptance checks. App content in snapshots and recordings stays in the ignored artifacts directory; the model receives the task, snapshot, inputs, and history.
+- Recording failure is reported explicitly but does not replace the QA verdict. App content in snapshots and recordings stays in the ignored artifacts directory; the model receives the task, snapshot, inputs, and history.
 - `jev-latest` can change. Set `TYPESAFE_MODEL` to a specific available version for repeatable comparisons. Each response's model version is saved.
 
 ## References
+
+- [Introducing System One Models & Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev)
 
 - [TypeSafe JavaScript SDK](https://docs.typesafe.ai/sdk/javascript)
 - [Jev choice questions](https://docs.typesafe.ai/primitives/choice)

@@ -1,5 +1,6 @@
-const PRESS_ROLES = new Set(['button', 'link', 'switch', 'checkbox', 'radio', 'radio-button', 'tab', 'tab-bar-item', 'menuitem', 'cell']);
-const FIELD_ROLES = new Set(['text-field', 'textfield', 'secure-text-field', 'textbox', 'edittext', 'search-field', 'textarea']);
+const PRESS_ROLES = new Set(['button', 'link', 'switch', 'checkbox', 'radio', 'radio-button', 'tab', 'tab-bar-item', 'menuitem', 'cell', 'radiobutton', 'tabbaritem', 'segmentedcontrol', 'key']);
+const normalizeRole = value => (value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const FIELD_ROLES = new Set(['text-field', 'textfield', 'secure-text-field', 'textbox', 'edittext', 'search-field', 'searchfield', 'securetextfield', 'textview', 'textarea']);
 
 export const visibleNodes = snapshot => snapshot.nodes.filter(n => n.visibleToUser !== false);
 
@@ -15,7 +16,7 @@ export function assertReadable(snapshot) {
 export function buildActions(snapshot, inputs = {}) {
   assertReadable(snapshot);
   const actions = [
-    { id: 'done', kind: 'done', description: 'The requested journey is complete. The current screen provides evidence of the requested final outcome. Finish and evaluate the acceptance checks.' },
+    { id: 'done', kind: 'done', description: 'The requested journey is complete, or the app shows a failure of the requested behavior. Stop interacting and review the observed evidence for a QA verdict.' },
     { id: 'blocked', kind: 'blocked', description: 'Cannot continue with the available controls or context. Stop as incomplete.' },
     { id: 'need_input', kind: 'blocked', description: 'The task needs text input that was not supplied. Stop as incomplete.' },
     { id: 'wait', kind: 'wait', description: 'Wait briefly for loading or an animation, then read the screen again.' },
@@ -24,11 +25,15 @@ export function buildActions(snapshot, inputs = {}) {
   ];
   for (const node of visibleNodes(snapshot)) {
     if (!node.ref || node.enabled === false || node.hittable === false || node.interactionBlocked) continue;
-    const ref = snapshot.refsGeneration != null && !node.ref.includes('~s')
-      ? `${node.ref}~s${snapshot.refsGeneration}` : node.ref;
+    const baseRef = node.ref.startsWith('@') ? node.ref : `@${node.ref}`;
+    const ref = snapshot.refsGeneration != null && !baseRef.includes('~s')
+      ? `${baseRef}~s${snapshot.refsGeneration}` : baseRef;
     const label = node.label || node.identifier || node.value || node.ref;
-    const role = (node.role || node.type || '').toLowerCase();
+    const roles = [node.type, node.role].filter(Boolean).map(normalizeRole);
+    const role = roles.find(r => FIELD_ROLES.has(r) || PRESS_ROLES.has(r)) || roles[0] || 'control';
     if (FIELD_ROLES.has(role) || node.editable === true) {
+      actions.push({ id: `a${actions.length}`, kind: 'press', ref, target: node.identifier || label,
+        description: `Focus ${role} ${JSON.stringify(label)} at ${node.ref}.` });
       for (const [name, text] of Object.entries(inputs)) {
         actions.push({ id: `a${actions.length}`, kind: 'fill', ref, target: node.identifier || label, text, inputName: name,
           description: `Fill ${role} ${JSON.stringify(label)} with the supplied input named ${JSON.stringify(name)}.` });
@@ -46,7 +51,7 @@ export function modelState(snapshot) {
   return {
     app: snapshot.appBundleId || snapshot.appName,
     nodes: visibleNodes(snapshot).map(({ ref, role, type, label, value, identifier, enabled, selected, editable, parentIndex, index }) =>
-      ({ ref, role: role || type, label, value, identifier, enabled, selected, editable, parentIndex, index })),
+      ({ ref, role: type || role, label, value, identifier, enabled, selected, editable, parentIndex, index })),
   };
 }
 

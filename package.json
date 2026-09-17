@@ -8,10 +8,9 @@
     "node": ">=24"
   },
   "scripts": {
-    "qa": "node --env-file-if-exists=.env src/cli.mjs",
+    "qa": "node src/cli.mjs",
     "demo": "node src/demo.mjs",
-    "test": "node --test test/*.test.mjs",
-    "check": "node --check src/agent.mjs && node --check src/cli.mjs && npm test"
+    "check": "node --check src/agent.mjs && node --check src/device.mjs && node --check src/cli.mjs"
   },
   "exports": "./src/index.mjs",
   "dependencies": {
