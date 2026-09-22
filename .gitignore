@@ -3,6 +3,9 @@ node_modules/
 .env.*
 !.env.example
 .agent-device/
+.autoqa-video/
 artifacts/
+profiles/*.local.json
+servers/laya/.venv/
+__pycache__/
 .DS_Store
-

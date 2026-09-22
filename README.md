@@ -1,87 +1,196 @@
-# Jev + agent-device QA agent
+# auto-qa
 
-Give the agent a task. It reads the app through agent-device, asks Jev to choose an action, performs it, and repeats with a fresh snapshot. Each run saves a report, decision trace, snapshots, and, when supported, a device recording.
+Give the agent a task in plain English. It opens your app, reads the screen, asks a **local**
+System One model which action to take, performs it, and repeats with a fresh snapshot until it
+decides `qa_pass`, `qa_fail`, or `incomplete`. Every run is recorded as a narrated video: a title
+card, a caption on each step with the model's confidence, and a verdict card at the end.
 
-This is a local proof of concept built with the TypeSafe and agent-device SDKs.
+Nothing leaves your machine. There is no API key and no hosted inference.
+
+Web apps run through Playwright/Chromium. iOS and Android apps run through
+[agent-device](https://oss.callstack.com/agent-device/docs/client-api).
+
+Credits: forked from [grabbou/jevil](https://github.com/grabbou/jevil) (the mobile QA decision loop),
+and driven by [jaredpalmer/kev](https://github.com/jaredpalmer/kev), an open System One pointer model
+you can serve locally.
 
 ## Setup
 
-Use Node.js 24 or newer. For live runs, you also need an iOS simulator/device with Xcode or an Android emulator/device with ADB, and an installed test app.
+Node.js 24 or newer.
 
 ```bash
 npm ci
+npx playwright install chromium   # web runs only
 cp .env.example .env
 ```
 
-Set `TYPESAFE_API_KEY` in `.env`, or supply it in your shell environment. `.env` and run artifacts are ignored by Git.
+### The decision model
 
-Check your device setup with `npx agent-device devices`. See the [agent-device setup guide](https://oss.callstack.com/agent-device/docs/agent-setup) for platform prerequisites.
+`auto-qa` talks plain HTTP to a local server that answers `POST /v1/systemone` with a choice,
+a confidence, and a probability distribution. Two backends are supported.
 
-## Run a task
-
-Pass the app ID, platform, and task. Describe the expected outcome in the task itself:
-
-```bash
-npm run qa -- \
-  --app com.apple.Preferences \
-  --platform ios \
-  "Open Accessibility, then Display & Text Size. Scroll to Smart Invert and verify that its switch is visible. Do not change any settings."
-```
-
-This example uses Settings on an English-language iOS simulator. For your app, replace the app ID and task:
+**kev (default).** Clone and serve [kev](https://github.com/jaredpalmer/kev):
 
 ```bash
-npm run qa -- \
-  --app com.example.shop \
-  --platform android \
-  "Add a Canvas backpack to the cart, increase its quantity to two, and open checkout. Verify that the summary shows the backpack and a quantity of two. Stop before placing an order."
+cd /path/to/kev
+uv run --extra serve python -m kev.serve --run jaredpalmer/kev-0.8b --port 8009
 ```
 
-Jev chooses actions until it selects `qa_pass`, `qa_fail`, or `incomplete`. That choice sets the final status. No separate assertion file is needed. The harness selects a simulator or emulator automatically, preferring one already booted. Use `--udid` on iOS or `--serial` on Android to override the selection. `npm run qa -- --help` lists the optional controls.
+Use the **0.8b** checkpoint unless you have memory to spare: it answers in tens of milliseconds
+warm. The 4b checkpoint wants roughly 32 GB of RAM — on a 16 GB machine it swaps and a single
+decision can take tens of seconds. Point `auto-qa` elsewhere with `KEV_URL` or `--model-url`.
 
-Each decision receives the current snapshot, the previous snapshot, and the action executed between them. Earlier snapshots stay in the saved artifacts instead of accumulating in the model context.
+**laya (optional).** A ModernBERT router served by the sidecar in this repo. It has a much smaller
+state budget and is weaker zero-shot, so it is opt-in. See [servers/laya/README.md](servers/laya/README.md),
+then run with `--backend laya`.
 
-For text entry, put exact values in double quotes inside the task. The harness makes those strings available as fill choices:
+| backend | default address | state budget | action cap |
+| --- | --- | --- | --- |
+| `kev` | `KEV_URL` or `http://127.0.0.1:8009` | 14,000 characters | 120 |
+| `laya` | `LAYA_URL` or `http://127.0.0.1:8010` | 1,600 characters | 40 |
+
+## Run a web task
+
+The task says what to do. `--expect` says what must be true for the run to pass — repeat it once per
+statement. Put exact form values in double quotes in the task: those strings become the only text the
+agent may type.
 
 ```bash
-npm run qa -- --app com.example.shop --platform ios \
-  'Search for "Canvas backpack" and verify that its product page opens.'
+npm run qa -- --url http://localhost:3000/pricing \
+  --expect 'A heading reading "Pro" is visible on the current screen.' \
+  --expect 'A monthly price is shown on the current screen.' \
+  'Open the "Pro" plan and check the monthly price.'
 ```
+
+Add `--headed` to watch it happen. `npm run qa -- --help` lists every flag.
+
+### Expectations are the pass criterion
+
+Before every step the agent renders the screen as a short transcript and asks the model one yes/no
+question per expectation. When every statement scores at least `--pass-threshold` (default `0.9`),
+the run passes right there — no further action, no model opinion involved. Otherwise the agent picks
+an action and tries again. The model can still end a run early as `qa_fail` or `incomplete`, but it
+has no way to declare a pass.
+
+That split is not decoration. With a 0.8B local model, offering "finish with QA PASS" among ~40
+choices let a run pass a page that did not contain the requested heading at all: probability mass
+spreads thin over many choices, and the pass option wins with 0.17. Asked instead as pointed yes/no
+statements over a rendered screen, true statements scored ≥ 0.95 and false ones ≤ 0.81 on the same
+pages.
+
+Two rules come out of that measurement and are enforced in code:
+
+- **The task never appears in a verification request.** State is `{ screen }` and nothing else.
+  Adding the task pulled a false statement from 0.27 up to 0.96 — the model agrees with the goal
+  instead of reading the screen.
+- **Write short, checkable, screen-local statements**, e.g. `A heading reading "Settings" is visible
+  on the current screen.` Vague or multi-part statements are exactly what small models judge badly.
+
+Without `--expect`, the task prompt is used as the single statement and the run warns you that this
+is the weak path.
+
+### Profiles
+
+A profile describes one app: where it lives, how to sign in, and which part of the page matters.
+It is a JSON file passed with `--profile`. Secrets are never stored in it — write `${ENV:NAME}`
+and the value is read from your environment (or `.env`) at run time; an unset variable is an error.
+
+```json
+{
+  "name": "demo",
+  "baseUrl": "http://localhost:3000",
+  "startPath": "/dashboard",
+  "scope": "main",
+  "viewport": { "width": 1280, "height": 800 },
+  "login": {
+    "path": "/login",
+    "fields": [
+      { "selector": "#email", "value": "qa@example.com" },
+      { "selector": "#password", "value": "${ENV:QA_PASSWORD}", "secret": true }
+    ],
+    "submit": "button[type=submit]",
+    "waitForUrlNot": "/login"
+  }
+}
+```
+
+```bash
+QA_PASSWORD=… npm run qa -- --profile profiles/demo.json \
+  'Open Settings and verify that the account email is shown.'
+```
+
+The login runs before the task, captioned `Setup: signing in`, with `secret` values masked on
+screen and in the recording.
+
+Every field is optional except `name` and `baseUrl`. `--url` overrides `baseUrl`/`startPath`;
+`--scope` overrides `scope`.
+
+## Run a mobile task
+
+```bash
+npm run qa -- --platform ios --app com.apple.Preferences \
+  --expect 'A switch labelled "Smart Invert" is visible on the current screen.' \
+  "Open Accessibility, then Display & Text Size, and scroll to Smart Invert. Do not change any settings."
+```
+
+Check your setup with `npx agent-device devices`. The harness picks a booted simulator or emulator
+when it can; pin one with `--udid` (iOS) or `--serial` (Android). See the
+[agent-device setup guide](https://oss.callstack.com/agent-device/docs/agent-setup).
 
 ## Output
 
-The CLI prints each selected action, then the result, startup time, run duration, token usage, estimated inference cost, and video path. Run details are saved as JSON.
-
 ```text
-PASSED: Jev found that the task was satisfied.
+PASSED: Every expectation was verified on the screen.
 Actions executed: <count> | QA confidence: <confidence>
+  ✓ 0.97  A heading reading "Pro" is visible on the current screen.
+  ✗ 0.31  A monthly price is shown on the current screen.
+Model: kev kev-latest at http://127.0.0.1:8009
 Startup: <seconds> s
 Duration: <seconds> s
-Jev input tokens: <tokens>
-Estimated inference cost: $<cost>
+Tokens: <in> in / <out> out over <n> local decisions
 Video: artifacts/<run-id>/run.mp4
 JSON: artifacts/<run-id>/report.json
 ```
 
-Startup includes device selection, app launch, runner preparation, and recording setup. Duration starts with the QA loop and includes saving the recording and closing the session.
+Startup covers browser or device launch, sign-in, and recording setup. Duration starts with the QA
+loop and includes flushing the recording.
 
-If the requested state is already visible, the run can pass without any actions. Ask the agent to repeat the navigation from a specific starting screen if you want to exercise the full path.
+`artifacts/<run-id>/` holds:
 
-Exit codes are `0` for pass, `1` for fail, `2` for incomplete, and `3` for an error. Incomplete means the agent couldn't finish or confidently assess the result.
+- `run.mp4` — the narrated run: title card, a caption per step (`step · description · confidence`)
+  with the target element outlined, then a full-screen verdict card (green pass, red fail, amber
+  incomplete).
+- `report.json` — status, reason, the final expectation scores, every decision with its probability
+  distribution, token counts, backend and model used.
+- `trace.jsonl` — the same steps streamed live, each with `t` (milliseconds since the run started)
+  and the expectation scores measured on that screen, so the video and the trace line up.
+- `snapshot-<n>.json`, `snapshot-final.json` — every screen the model read, in full.
+- `final.png` — the app exactly as the run left it, captured before the verdict card is drawn.
 
-The video, screenshots, snapshots, and decision trace are saved in `artifacts/<run-id>/`. Inference cost uses returned token usage and `JEV_INPUT_USD_PER_MILLION`; it excludes device costs.
+Exit codes: `0` pass, `1` fail, `2` incomplete, `3` runtime or configuration error. Incomplete means
+the agent could not finish or could not assess the result from what it observed.
 
 ## Run limits
 
-- Runs stop after 40 steps or 180 seconds by default. Adjust these with `--max-steps` and `--timeout`.
-- Large screens can exceed Jev's 255-choice limit. Use `--scope` to focus on part of the app. The harness also caps each request's state at 80,000 characters.
+- Runs stop after 40 steps or 180 seconds by default (`--max-steps`, `--timeout`).
+- Each request's state is capped per backend (table above). When a screen is too large, the agent
+  drops descriptive lines first, then the previous-step summary, and only then fails with a
+  suggestion to use `--scope`. Trimmed screens end with `(content trimmed to fit)`.
+- A screen offering more choices than the backend's action cap is an error, not a truncated list:
+  narrow it with `--scope` or pass fewer quoted values.
+- A decision sees the rendered screen (with its url) and a short summary of the step before it: the
+  action executed, where it ran, and whether the screen or the url changed as a result. A
+  verification sees the rendered screen and nothing else. Full snapshots stay on disk instead of
+  accumulating in the model's context — small models decide better on a small state.
+- Every step costs two local requests, one verification and one decision; a step that passes costs
+  only the verification.
+- If the requested state is already visible, a run can pass with zero actions. Ask for the
+  navigation explicitly if you want the whole path exercised.
 
 ## References
 
-- [Introducing System One Models & Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev)
-- [TypeSafe JavaScript SDK](https://docs.typesafe.ai/sdk/javascript)
-- [Jev choice questions](https://docs.typesafe.ai/primitives/choice)
-- [Confidence](https://docs.typesafe.ai/confidence)
-- [agent-device Node.js API](https://oss.callstack.com/agent-device/docs/client-api)
+- [grabbou/jevil](https://github.com/grabbou/jevil) — the project this is forked from
+- [jaredpalmer/kev](https://github.com/jaredpalmer/kev) — local System One pointer model
+- [convaiinnovations/laya](https://github.com/convaiinnovations/laya) — the alternate router backend
 - [agent-device snapshots](https://oss.callstack.com/agent-device/docs/snapshots)
-
+- [Playwright](https://playwright.dev/)

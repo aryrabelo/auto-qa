@@ -1,19 +1,19 @@
 {
-  "name": "jev-agent-device",
+  "name": "auto-qa",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "A Jev decision loop for mobile QA with agent-device",
+  "description": "Narrated QA runs for web and mobile apps, decided by a local System One model",
   "engines": {
     "node": ">=24"
   },
   "scripts": {
     "qa": "node src/cli.mjs",
-    "check": "node --check src/agent.mjs && node --check src/device.mjs && node --check src/cli.mjs"
+    "check": "node --check src/actions.mjs && node --check src/agent.mjs && node --check src/browser.mjs && node --check src/cli.mjs && node --check src/device.mjs && node --check src/index.mjs && node --check src/inputs.mjs && node --check src/model.mjs && node --check src/video.mjs"
   },
   "exports": "./src/index.mjs",
   "dependencies": {
-    "@typesafe-ai/sdk": "0.6.0",
-    "agent-device": "0.21.6"
+    "agent-device": "0.21.6",
+    "playwright": "1.63.0"
   }
 }
