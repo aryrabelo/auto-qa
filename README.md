@@ -122,8 +122,9 @@ QA_PASSWORD=… npm run qa -- --profile profiles/demo.json \
 The login runs before the task, captioned `Setup: signing in`, with `secret` values masked on
 screen and in the recording.
 
-Every field is optional except `name` and `baseUrl`. `--url` overrides `baseUrl`/`startPath`;
-`--scope` overrides `scope`.
+Every field is optional except `name` and `baseUrl`. `--url` is the start page whenever it is
+given — it wins over `startPath`, while the profile still supplies `baseUrl`, the sign-in steps
+and the viewport. `--scope` overrides `scope`.
 
 ## Run a mobile task
 
@@ -173,6 +174,9 @@ the agent could not finish or could not assess the result from what it observed.
 ## Run limits
 
 - Runs stop after 40 steps or 180 seconds by default (`--max-steps`, `--timeout`).
+- One model request gets 60 seconds (`--model-timeout <seconds>`, or `AUTOQA_MODEL_TIMEOUT`). Raise
+  it for a large checkpoint on a small machine, where a cold decision can take tens of seconds; the
+  timeout message names the flag.
 - Each request's state is capped per backend (table above). When a screen is too large, the agent
   drops descriptive lines first, then the previous-step summary, and only then fails with a
   suggestion to use `--scope`. Trimmed screens end with `(content trimmed to fit)`.
@@ -186,6 +190,38 @@ the agent could not finish or could not assess the result from what it observed.
   only the verification.
 - If the requested state is already visible, a run can pass with zero actions. Ask for the
   navigation explicitly if you want the whole path exercised.
+
+## What the agent can do on a web page
+
+Every screen is offered as a list of concrete actions: press a control, fill a field with one of
+the quoted values from the task, press Enter in a field, choose an option of a native `<select>`,
+scroll, go back, wait, or finish.
+
+- **Typing is real typing.** A fill clears the field and then sends each character as a key event,
+  so `keydown`/`keypress`/`input`/`keyup` handlers run: debounced search, type-ahead and live
+  validation behave exactly as they do for a person. Setting the value silently, as
+  `element.value = …` does, is what makes those features untestable.
+- **Press Enter** is offered for every text field (`--expect` a result, not a keystroke). It is a
+  web-only action: mobile devices declare no key capability and are never offered it.
+- **Custom selects work.** Options rendered as `[role="option"]`, `[role="menuitem"]` or
+  `[role="treeitem"]` — the shape TomSelect, Select2 and Headless UI produce — are read as nodes
+  and offered as press actions once the control is open. The hidden native `<select>` behind such
+  a widget stays hidden, so the same choice is never offered twice.
+
+## Waiting for the page
+
+After every action the agent waits for the page to stop moving: `load`, then network idle (3 s cap
+each), then `aria-busy="true"` elements and a visible Turbo/nprogress bar to disappear, then a DOM
+with no mutation for 300 ms, and finally `--settle-ms` (default 400 ms) of grace for a late
+reaction. A request starting inside that grace — a debounced submit, a lazy turbo-frame — restarts
+the wait. `--settle-timeout` (default 10 s) caps the whole thing.
+
+Raise `--settle-ms` above the app's debounce interval when a search box submits on `keyup`: with a
+1 s debounce, `--settle-ms 1500` is what turns "the action did nothing" into the filtered page.
+
+When an element's ref stops resolving because the app navigated under the action, the step is not a
+failed run: the agent records a warning, re-reads the screen and decides again, twice at most
+before the error surfaces normally.
 
 ## References
 

@@ -23,9 +23,12 @@ const HELP = `Usage: npm run qa -- --url <address> --expect "<statement>" [optio
   --backend kev|laya           Local decision model; default: AUTOQA_BACKEND or kev
   --model-url <address>        Override the decision server address (default KEV_URL/LAYA_URL)
   --model <id>                 Override the served model name
+  --model-timeout <seconds>    One model request's deadline; default: AUTOQA_MODEL_TIMEOUT or 60
   --max-steps <n>              Default: 40
   --min-confidence <0..1>      Action cutoff; default: 0 (disabled)
   --timeout <seconds>          Default: 180; cancels model requests, stops between device calls
+  --settle-ms <ms>             Web: grace for a late reaction after each action; default: 400
+  --settle-timeout <seconds>   Web: cap on waiting for a page to settle; default: 10
   --scope <label/id>           Limit the snapshot to a specific subtree
   --artifacts <directory>      Default: artifacts
   --no-record                  Disable video capture
@@ -67,11 +70,22 @@ async function loadProfile(file) {
   return resolveEnvReferences(parsed, path);
 }
 
+/** Parses a numeric flag, naming the flag in the error so a bad value is self-explanatory. */
+function requireNumber(flag, raw, { min, max, integer = false } = {}) {
+  const value = Number(raw);
+  if (raw === '' || raw == null || !Number.isFinite(value) || (integer && !Number.isInteger(value)) || value < min || value > max) {
+    throw new Error(`${flag} must be ${integer ? 'a whole number' : 'a number'} between ${min} and ${max}; got ${JSON.stringify(String(raw))}.`);
+  }
+  return value;
+}
+
 async function buildDevice(v, prompt, profile, backend) {
   if (v.platform === 'web') {
     if (!v.url && !profile) throw new Error('Web runs need --url or --profile. Run npm run qa -- --help for examples.');
     const { BrowserDevice } = await import('./browser.mjs');
     return new BrowserDevice({ url: v.url, profile, headless: !v.headed, backend,
+      settleMs: requireNumber('--settle-ms', v['settle-ms'], { min: 0, max: 60_000, integer: true }),
+      settleTimeoutMs: requireNumber('--settle-timeout', v['settle-timeout'], { min: 0.1, max: 300 }) * 1000,
       scope: v.scope || profile?.scope, title: prompt });
   }
   if (!v.app) throw new Error('Mobile runs need --app with the bundle or package ID.');
@@ -90,8 +104,10 @@ async function main() {
     device: { type: 'string' }, udid: { type: 'string' }, serial: { type: 'string' },
     expect: { type: 'string', multiple: true }, 'pass-threshold': { type: 'string', default: '0.9' },
     backend: { type: 'string' }, 'model-url': { type: 'string' }, model: { type: 'string' },
+    'model-timeout': { type: 'string' },
     'max-steps': { type: 'string', default: '40' },
     'min-confidence': { type: 'string', default: '0' }, timeout: { type: 'string', default: '180' },
+    'settle-ms': { type: 'string', default: '400' }, 'settle-timeout': { type: 'string', default: '10' },
     scope: { type: 'string' }, artifacts: { type: 'string', default: 'artifacts' },
     'no-record': { type: 'boolean', default: false }, help: { type: 'boolean', short: 'h' },
   } });
@@ -101,7 +117,9 @@ async function main() {
   if (!['web', 'ios', 'android'].includes(v.platform)) throw new Error('--platform must be web, ios, or android.');
   const profile = v.profile ? await loadProfile(v.profile) : null;
   const backend = v.backend || process.env.AUTOQA_BACKEND || 'kev';
-  const model = new SystemOneModel({ backend, url: v['model-url'], model: v.model });
+  const modelTimeout = requireNumber('--model-timeout',
+    v['model-timeout'] ?? process.env.AUTOQA_MODEL_TIMEOUT ?? '60', { min: 1, max: 600 });
+  const model = new SystemOneModel({ backend, url: v['model-url'], model: v.model, timeoutMs: modelTimeout * 1000 });
   const device = await buildDevice(v, prompt, profile, backend);
   const agent = new QaAgent({ model, device, expectations: v.expect ?? [],
     passThreshold: Number(v['pass-threshold']), maxSteps: Number(v['max-steps']),

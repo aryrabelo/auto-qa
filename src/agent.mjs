@@ -10,6 +10,11 @@ function finite(value, name, min, max = Infinity) {
 
 const size = value => JSON.stringify(value).length;
 
+// A ref that stopped resolving because the app navigated is recoverable: re-read the screen.
+// Bounded, so a page that keeps moving cannot hold the run in a retry loop.
+const MAX_STALE_RETRIES = 2;
+const isStaleRef = error => error?.code === 'stale_ref' || error?.name === 'StaleRefError';
+
 // The decision model has a hard context budget. Shed the least valuable context first:
 // descriptive screen lines, then the previous-step transition. Never silently drop controls.
 export function budgetState(state, maxStateChars, backend = 'the model') {
@@ -99,7 +104,7 @@ export class QaAgent {
       if (answer.model && !result.modelVersions.includes(answer.model)) result.modelVersions.push(answer.model);
       return answer;
     };
-    let opened = false, recording = false, lastSignature = '', repeats = 0;
+    let opened = false, recording = false, lastSignature = '', repeats = 0, staleRetries = 0;
     try {
       await mkdir(directory, { recursive: true });
       await writeFile(join(directory, 'trace.jsonl'), '');
@@ -148,7 +153,7 @@ export class QaAgent {
           break;
         }
         signal.throwIfAborted();
-        const actions = buildActions(snapshot, inputs);
+        const actions = buildActions(snapshot, inputs, this.device.capabilities ?? {});
         if (actions.length > maxActions) {
           throw new Error(`This screen offers ${actions.length} actions, over the ${backend} limit of ${maxActions}. Narrow the snapshot with --scope, or supply fewer input values.`);
         }
@@ -179,11 +184,24 @@ export class QaAgent {
           result.reason = action.id;
           break;
         }
-        const signature = current + JSON.stringify([action.kind, action.target, action.inputName, action.direction, action.value]);
+        const signature = current + JSON.stringify([action.kind, action.target, action.inputName, action.direction, action.value, action.key]);
         repeats = signature === lastSignature ? repeats + 1 : 1;
         lastSignature = signature;
         if (repeats >= 3) { result.reason = 'repeated_action_without_progress'; break; }
-        await this.device.act(action, { signal });
+        try {
+          await this.device.act(action, { signal });
+        } catch (error) {
+          // The page changed under the action: that is the app moving, not a broken run. Read the
+          // new screen and decide again, without counting the attempt as a repeat that made no progress.
+          if (!isStaleRef(error) || staleRetries >= MAX_STALE_RETRIES) throw error;
+          staleRetries++;
+          result.warnings.push(`Step ${step}: ${safeError(error)} Re-reading the screen (stale retry ${staleRetries}/${MAX_STALE_RETRIES}).`);
+          await appendFile(join(directory, 'trace.jsonl'), JSON.stringify({ step, t: elapsed(), kind: 'stale_ref', choice: action.id, retry: staleRetries }) + '\n');
+          repeats = 0;
+          lastSignature = '';
+          continue;
+        }
+        staleRetries = 0;
         previousFingerprint = current;
         previous = { ...(snapshot.url !== undefined && { url: snapshot.url }),
           ...(snapshot.appName !== undefined && { title: snapshot.appName }), action: action.description };

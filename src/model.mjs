@@ -26,10 +26,11 @@ const DECISION_INSTRUCTIONS =
   'Choose incomplete or need_input if you cannot continue. Avoid repeating actions that had no effect.';
 
 export class SystemOneModel {
-  constructor({ backend = process.env.AUTOQA_BACKEND || 'kev', url, model, timeoutMs = 30_000, maxStateChars, maxActions, fetchImpl = fetch } = {}) {
+  // 60 s by default: a cold or swapping local checkpoint can take tens of seconds for one decision.
+  constructor({ backend = process.env.AUTOQA_BACKEND || 'kev', url, model, timeoutMs = 60_000, maxStateChars, maxActions, fetchImpl = fetch } = {}) {
     const preset = BACKENDS[backend];
     if (!preset) throw new Error(`Unknown backend ${JSON.stringify(backend)}. Use one of: ${Object.keys(BACKENDS).join(', ')}.`);
-    if (!Number.isFinite(timeoutMs) || timeoutMs < 1) throw new Error('Invalid timeoutMs.');
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 1) throw new Error('Invalid model request timeout. Set it in seconds with --model-timeout or AUTOQA_MODEL_TIMEOUT.');
     this.backend = backend;
     this.url = String(url || preset.url()).replace(/\/+$/, '');
     this.model = model || preset.model;
@@ -92,7 +93,7 @@ export class SystemOneModel {
       });
     } catch (error) {
       if (signal?.aborted) throw error;
-      if (deadline.aborted) throw new Error(`The ${this.backend} decision server at ${this.url} did not answer within ${this.timeoutMs} ms.`);
+      if (deadline.aborted) throw new Error(`The ${this.backend} decision server at ${this.url} did not answer within ${this.timeoutMs / 1000} s. Raise the limit with --model-timeout <seconds> (or AUTOQA_MODEL_TIMEOUT).`);
       throw new Error(`Cannot reach the ${this.backend} decision server at ${this.url} (${describeCause(error)}). ${this.startHint}`);
     }
     if (!response.ok) {

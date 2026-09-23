@@ -1,4 +1,4 @@
-const PRESS_ROLES = new Set(['button', 'link', 'switch', 'checkbox', 'radio', 'radio-button', 'tab', 'tab-bar-item', 'menuitem', 'cell', 'radiobutton', 'tabbaritem', 'segmentedcontrol', 'key']);
+const PRESS_ROLES = new Set(['button', 'link', 'switch', 'checkbox', 'radio', 'radio-button', 'tab', 'tab-bar-item', 'menuitem', 'option', 'treeitem', 'cell', 'radiobutton', 'tabbaritem', 'segmentedcontrol', 'key']);
 const normalizeRole = value => (value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 const FIELD_ROLES = new Set(['text-field', 'textfield', 'secure-text-field', 'textbox', 'edittext', 'search-field', 'searchfield', 'securetextfield', 'textview', 'textarea']);
 const SELECT_ROLES = new Set(['combobox', 'select', 'spinner', 'picker']);
@@ -16,7 +16,9 @@ export function assertReadable(snapshot) {
   }
 }
 
-export function buildActions(snapshot, inputs = {}) {
+// capabilities describes what the device under test can do beyond pointing: `key` means it can send
+// a real key press to a focused field. Devices that cannot are simply never offered the action.
+export function buildActions(snapshot, inputs = {}, capabilities = {}) {
   assertReadable(snapshot);
   const actions = [
     // There is no qa_pass: a pass is decided by verifying the expectations, never by this choice.
@@ -47,6 +49,10 @@ export function buildActions(snapshot, inputs = {}) {
       for (const [name, text] of Object.entries(inputs)) {
         actions.push({ id: `a${actions.length}`, kind: 'fill', ref, target: node.identifier || label, text, inputName: name,
           description: `Fill ${role} ${JSON.stringify(label)} with ${JSON.stringify(text)}.` });
+      }
+      if (capabilities.key) {
+        actions.push({ id: `a${actions.length}`, kind: 'key', key: 'Enter', ref, target: node.identifier || label,
+          description: `Press Enter in ${role} ${JSON.stringify(label)} at ${node.ref} to submit or confirm what it contains.` });
       }
     } else if (PRESS_ROLES.has(role) || (node.hittable === true && node.label)) {
       // A link to the page already shown cannot advance the task; say so instead of hiding it.

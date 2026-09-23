@@ -7,6 +7,8 @@ export class AgentDevice {
     if (!['ios', 'android'].includes(platform)) throw new Error('This POC supports ios and android.');
     this.target = { app, platform, device, udid, serial };
     this.scope = scope;
+    // agent-device has no key-press interaction, so the Enter action is never offered on mobile.
+    this.capabilities = { key: false };
     this.settleMs = settleMs;
     this.client = client || createAgentDeviceClient({ session, cwd, lockPolicy: 'reject', lockPlatform: platform, responseLevel: 'full' });
   }

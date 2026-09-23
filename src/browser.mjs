@@ -10,8 +10,20 @@ const TITLE_CARD_MS = 2000;
 const VERDICT_CARD_MS = 2500;
 const LOGIN_TIMEOUT_MS = 20_000;
 const LOAD_CAP_MS = 3000;
+const DOM_QUIET_MS = 300;
+const SETTLE_TIMEOUT_MS = 10_000;
+const SETTLE_PASSES = 4;
 const HIGHLIGHT_HOLD_MS = 700;
 const MASK = '••••••••';
+
+/** Thrown when an element ref stopped resolving because the page changed under the action. */
+export class StaleRefError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'StaleRefError';
+    this.code = 'stale_ref';
+  }
+}
 
 /** Renders (and persists) the recorded overlay. Runs inside the page: no outer references. */
 function renderOverlay(patch) {
@@ -226,7 +238,8 @@ function collectSnapshot({ scope, nameChars, textChars, maxInteractive, maxText,
   };
   const roleOf = el => {
     const explicit = (el.getAttribute('role') || '').toLowerCase();
-    if (['button', 'link', 'checkbox', 'radio', 'tab', 'menuitem', 'textbox', 'combobox', 'switch'].includes(explicit)) {
+    if (['button', 'link', 'checkbox', 'radio', 'tab', 'menuitem', 'option', 'treeitem',
+      'textbox', 'combobox', 'switch'].includes(explicit)) {
       return explicit === 'switch' ? 'checkbox' : explicit;
     }
     const tag = el.tagName.toLowerCase();
@@ -253,9 +266,11 @@ function collectSnapshot({ scope, nameChars, textChars, maxInteractive, maxText,
     hiddenContentBelow: scrollY + innerHeight < (document.documentElement.scrollHeight || 0) - 4,
   }];
 
+  // JS-backed selects (TomSelect, Select2, Headless UI…) render their choices as [role="option"]
+  // outside the native control: without them the widget is pressable but its options are a dead end.
   const INTERACTIVE = 'a[href],button,summary,select,textarea,input,[contenteditable=""],[contenteditable="true"],' +
     '[role="button"],[role="link"],[role="checkbox"],[role="radio"],[role="switch"],[role="tab"],[role="menuitem"],' +
-    '[role="textbox"],[role="combobox"]';
+    '[role="option"],[role="treeitem"],[role="textbox"],[role="combobox"]';
   let index = 0;
   for (const el of root.querySelectorAll(INTERACTIVE)) {
     if (index >= maxInteractive) break;
@@ -281,7 +296,7 @@ function collectSnapshot({ scope, nameChars, textChars, maxInteractive, maxText,
       node.selected = Boolean(el.checked || el.getAttribute('aria-checked') === 'true');
     } else if (role === 'link') {
       if (isCurrentHref(el)) { node.selected = true; node.current = true; }
-    } else if (role === 'tab') {
+    } else if (role === 'tab' || role === 'option' || role === 'treeitem') {
       if (el.getAttribute('aria-selected') === 'true') node.selected = true;
     } else if (role === 'combobox' && el.options) {
       node.options = [...el.options].slice(0, maxOptions).map(option => clean(option.label || option.text || option.value, 40));
@@ -325,8 +340,29 @@ function collectSnapshot({ scope, nameChars, textChars, maxInteractive, maxText,
   };
 }
 
+/**
+ * True when nothing has mutated the DOM for quietMs and nothing declares itself busy.
+ * Runs inside the page: no outer references. The observer is installed on the first call and
+ * lives on window, so each poll reads the same timestamp instead of restarting the measurement.
+ */
+function pageSettled({ quietMs }) {
+  const KEY = '__aqa_settle';
+  let state = window[KEY];
+  if (!state || !state.observer) {
+    state = window[KEY] = { last: performance.now(), observer: null };
+    state.observer = new MutationObserver(() => { state.last = performance.now(); });
+    state.observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+    return false;
+  }
+  const busy = document.querySelector('[aria-busy="true"]') ||
+    document.querySelector('.turbo-progress-bar,[data-turbo-progress-bar],#nprogress');
+  if (busy) { state.last = performance.now(); return false; }
+  return performance.now() - state.last >= quietMs;
+}
+
 export class BrowserDevice {
-  constructor({ url, profile, headless = true, viewport, settleMs = 400, scope, title, backend, highlightMs = HIGHLIGHT_HOLD_MS } = {}) {
+  constructor({ url, profile, headless = true, viewport, settleMs = 400, settleTimeoutMs = SETTLE_TIMEOUT_MS,
+    scope, title, backend, highlightMs = HIGHLIGHT_HOLD_MS } = {}) {
     const base = profile?.baseUrl;
     const target = url || (base ? new URL(profile?.startPath || '/', base).toString() : null);
     if (!target) throw new Error('A target url (or a profile with baseUrl) is required.');
@@ -334,7 +370,10 @@ export class BrowserDevice {
     this.profile = profile || null;
     this.headless = headless;
     this.viewport = viewport || profile?.viewport || DEFAULT_VIEWPORT;
-    this.settleMs = settleMs;
+    this.settleMs = Number.isFinite(settleMs) && settleMs >= 0 ? settleMs : 400;
+    this.settleTimeoutMs = Number.isFinite(settleTimeoutMs) && settleTimeoutMs > 0 ? settleTimeoutMs : SETTLE_TIMEOUT_MS;
+    // A web page can be typed into key by key, so pressing Enter in a field is a real action here.
+    this.capabilities = { key: true };
     this.scope = scope || profile?.scope || null;
     this.title = title || 'Web QA run';
     this.backend = backend || null;
@@ -416,9 +455,9 @@ export class BrowserDevice {
       await this.apply({ title: null });
     }
 
-    const start = this.profile?.startPath
-      ? new URL(this.profile.startPath, this.profile.baseUrl || this.url).toString()
-      : this.url;
+    // this.url is already the resolved start page: an explicit --url when one was given, the
+    // profile's baseUrl + startPath otherwise. Recomputing it here would override --url.
+    const start = this.url;
     await this.page.goto(start, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await this.settle();
     // The setup caption must not linger while the model thinks about the first step.
@@ -426,11 +465,29 @@ export class BrowserDevice {
     return { platform: 'web', url: this.page.url(), browser: 'chromium' };
   }
 
+  /**
+   * Waits for the page to stop moving: load, network, aria-busy/progress bar, a quiet DOM, and
+   * then settleMs of grace for a late reaction — a debounced submit or a lazy frame starts its
+   * request long after the DOM went quiet, so a request arriving inside that window restarts the
+   * wait. Everything is bounded by settleTimeoutMs.
+   */
   async settle() {
     if (!this.page || this.page.isClosed()) return;
-    await this.page.waitForLoadState('load', { timeout: LOAD_CAP_MS }).catch(() => {});
-    await this.page.waitForLoadState('networkidle', { timeout: LOAD_CAP_MS }).catch(() => {});
-    await delay(this.settleMs);
+    const deadline = Date.now() + this.settleTimeoutMs;
+    const left = () => deadline - Date.now();
+    for (let pass = 0; pass < SETTLE_PASSES; pass++) {
+      await this.page.waitForLoadState('load', { timeout: Math.min(LOAD_CAP_MS, Math.max(left(), 1)) }).catch(() => {});
+      await this.page.waitForLoadState('networkidle', { timeout: Math.min(LOAD_CAP_MS, Math.max(left(), 1)) }).catch(() => {});
+      // Turbo/AJAX visits keep mutating the DOM long after networkidle; a quiet DOM is the real signal.
+      if (left() > 50) {
+        await this.page.waitForFunction(pageSettled, { quietMs: DOM_QUIET_MS },
+          { timeout: left(), polling: 100 }).catch(() => {});
+      }
+      const grace = Math.min(this.settleMs, Math.max(left(), 0));
+      if (grace <= 0) break;
+      const reacted = await this.page.waitForRequest(() => true, { timeout: grace }).then(() => true).catch(() => false);
+      if (!reacted || left() <= 0) break;
+    }
     await this.apply({});
   }
 
@@ -456,30 +513,66 @@ export class BrowserDevice {
     }).catch(() => false);
   }
 
+  /**
+   * Runs an interaction against a ref, turning "the page moved under us" into a typed StaleRefError
+   * so the caller can re-read the screen instead of ending the run.
+   */
+  async interact(ref, run) {
+    const id = BrowserDevice.ref(ref);
+    const before = this.page.url();
+    const target = this.locator(ref);
+    const resolves = async () => Boolean(await target.count().catch(() => 0));
+    if (!(await resolves())) {
+      throw new StaleRefError(`Element ${id} is no longer on the page: the screen changed before the action ran.`);
+    }
+    try {
+      return await run(target);
+    } catch (error) {
+      if (error instanceof StaleRefError) throw error;
+      const message = String(error?.message || '');
+      const transient = /Timeout \d+ms exceeded|detached|not attached|Execution context was destroyed|navigat|Target (page|closed)|frame was detached/i.test(message);
+      const gone = !(await resolves());
+      const moved = !this.page.isClosed() && this.page.url() !== before;
+      if (transient && (gone || moved)) {
+        throw new StaleRefError(`Element ${id} stopped responding while the page was changing (${message.split('\n')[0]}).`);
+      }
+      throw error;
+    }
+  }
+
   async act(action, { signal } = {}) {
     signal?.throwIfAborted();
     if (!this.page || this.page.isClosed()) throw new Error('The browser page is closed.');
     switch (action.kind) {
-      case 'press': {
-        const target = this.locator(action.ref);
-        try {
-          await target.click({ timeout: 4000 });
-        } catch (error) {
-          if (!(await this.coveredByOverlay(target))) throw error;
-          await target.click({ force: true, timeout: 4000 });
-        }
+      case 'press':
+        await this.interact(action.ref, async target => {
+          try {
+            await target.click({ timeout: 4000 });
+          } catch (error) {
+            if (!(await this.coveredByOverlay(target))) throw error;
+            await target.click({ force: true, timeout: 4000 });
+          }
+        });
         break;
-      }
       case 'fill':
-        await this.locator(action.ref).fill(String(action.text ?? action.value ?? ''), { timeout: 8000 });
+        // fill() alone sets the value without a single key event, so keyup-driven search,
+        // type-ahead and validation never run. Clear, then type the text key by key.
+        await this.interact(action.ref, async target => {
+          const text = String(action.text ?? action.value ?? '');
+          await target.fill('', { timeout: 8000 });
+          await target.pressSequentially(text, { delay: 20, timeout: 8000 });
+        });
         break;
-      case 'select': {
-        const target = this.locator(action.ref);
-        const value = String(action.value ?? action.text ?? '');
-        try { await target.selectOption({ label: value }, { timeout: 8000 }); }
-        catch { await target.selectOption(value, { timeout: 8000 }); }
+      case 'key':
+        await this.interact(action.ref, target => target.press(String(action.key || 'Enter'), { timeout: 8000 }));
         break;
-      }
+      case 'select':
+        await this.interact(action.ref, async target => {
+          const value = String(action.value ?? action.text ?? '');
+          try { await target.selectOption({ label: value }, { timeout: 8000 }); }
+          catch { await target.selectOption(value, { timeout: 8000 }); }
+        });
+        break;
       case 'scroll': {
         const { width, height } = this.viewport;
         const step = { down: [0, height * 0.7], up: [0, -height * 0.7], right: [width * 0.7, 0], left: [-width * 0.7, 0] }[action.direction];
